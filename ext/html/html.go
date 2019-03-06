@@ -3,14 +3,15 @@ package goproxy_html
 
 import (
 	"bytes"
-	"code.google.com/p/go-charset/charset"
-	_ "code.google.com/p/go-charset/data"
 	"errors"
-	"github.com/elazarl/goproxy"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"strings"
+
+	"github.com/datasift/go-charset/charset"
+	_ "github.com/datasift/go-charset/data"
+	"github.com/elazarl/goproxy"
 )
 
 var IsHtml goproxy.RespCondition = goproxy.ContentTypeIs("text/html")
