@@ -129,9 +129,6 @@ func NewLogger(basepath string) (*HttpLogger, error) {
 func (logger *HttpLogger) LogResp(resp *http.Response, ctx *goproxy.ProxyCtx) {
 	body := path.Join(logger.path, fmt.Sprintf("%d_resp", ctx.Session))
 	from := ""
-	if ctx.RoundTrip != nil {
-		from = ctx.RoundTrip.TCPAddr.String()
-	}
 	if resp == nil {
 		resp = emptyResp
 	} else {
