@@ -1,12 +1,11 @@
 [[constraint]]
-  name = "code.google.com/p/go-charset/charset"
   branch = "master"
+  name = "github.com/datasift/go-charset"
   source = "github.com/stripe/go-charset"
 
 [[constraint]]
   name = "github.com/elazarl/goproxy"
   version = "1.1.0"
-  source = "github.com/stripe/goproxy"
 
 [prune]
   go-tests = true
