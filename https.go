@@ -605,5 +605,8 @@ func httpsProxyAddr(reqURL *url.URL, httpsProxy string) (string, error) {
 		service = proxyURL.Scheme
 	}
 
+	if proxyURL.User != nil {
+		return fmt.Sprintf("%s://%s@%s:%s", proxyURL.Scheme, proxyURL.User.String(), proxyURL.Hostname(), service), nil
+	}
 	return fmt.Sprintf("%s://%s:%s", proxyURL.Scheme, proxyURL.Hostname(), service), nil
 }
