@@ -119,25 +119,25 @@ func (proxy *ProxyHttpServer) addBasicAuth(r *http.Request) error {
 	}
 
 	var err error
-	var url *url.URL
+	var parsed *url.URL
 	switch r.URL.Scheme {
 	case "http":
-		url, err = url.Parse(proxy.HttpProxyAddr)
+		parsed, err = url.Parse(proxy.HttpProxyAddr)
 		if err != nil {
 			return err
 		}
 	case "https":
-		url, err = url.Parse(proxy.HttpsProxyAddr)
+		parsed, err = url.Parse(proxy.HttpsProxyAddr)
 		if err != nil {
 			return err
 		}
 	}
 
-	if url == nil {
+	if parsed == nil {
 		return nil
 	}
 
-	if user := url.User; user != nil {
+	if user := parsed.User; user != nil {
 		r.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 	}
 
