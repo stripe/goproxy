@@ -47,6 +47,15 @@ var auth = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *ht
 	w.WriteHeader(http.StatusOK)
 }))
 
+var authTLS = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	user, pass, ok := r.BasicAuth()
+	if !ok || user != authUser || pass != authPass {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}))
+
 type QueryHandler struct{}
 
 func (QueryHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -90,6 +99,14 @@ func getOrFail(url string, client *http.Client, t *testing.T) []byte {
 
 func authURL() string {
 	url, err := url.Parse(auth.URL)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s://%s:%s@%s", url.Scheme, authUser, authPass, url.Host)
+}
+
+func authTLSURL() string {
+	url, err := url.Parse(authTLS.URL)
 	if err != nil {
 		panic(err)
 	}
@@ -473,7 +490,6 @@ func TestAuthed_Deny(t *testing.T) {
 }
 
 func TestAuthed_Pass(t *testing.T) {
-	fmt.Println(authURL())
 	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpProxyAddr(authURL()))
 
 	client, l := oneShotProxy(proxy, t)
@@ -483,6 +499,68 @@ func TestAuthed_Pass(t *testing.T) {
 	panicOnErr(err, "resp to HEAD")
 	if resp.StatusCode != http.StatusOK {
 		t.Error("Status should be a 200")
+	}
+}
+
+func TestAuthed_HTTPS(t *testing.T) {
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpsProxyAddr(authTLSURL()))
+	proxy.OnRequest(goproxy.ReqHostIs("https://foo")).HandleConnect(goproxy.AlwaysMitm)
+
+	_, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	c, err := tls.Dial("tcp", https.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal("cannot dial to tcp server", err)
+	}
+	c.Close()
+
+	c2, err := net.Dial("tcp", l.Listener.Addr().String())
+	if err != nil {
+		t.Fatal("dialing to proxy", err)
+	}
+	creq, err := http.NewRequest("CONNECT", https.URL, nil)
+	if err != nil {
+		t.Fatal("create new request", creq)
+	}
+	creq.Write(c2)
+	c2buf := bufio.NewReader(c2)
+	resp, err := http.ReadResponse(c2buf, creq)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatal("Cannot CONNECT through proxy", err)
+	}
+}
+
+func TestAuthed_HTTPSDeny(t *testing.T) {
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpsProxyAddr(authTLS.URL))
+	proxy.OnRequest(goproxy.ReqHostIs("https://foo")).HandleConnect(goproxy.AlwaysMitm)
+
+	_, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	c, err := tls.Dial("tcp", https.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal("cannot dial to tcp server", err)
+	}
+	c.Close()
+
+	c2, err := net.Dial("tcp", l.Listener.Addr().String())
+	if err != nil {
+		t.Fatal("dialing to proxy", err)
+	}
+	creq, err := http.NewRequest("CONNECT", https.URL, nil)
+	if err != nil {
+		t.Fatal("create new request", creq)
+	}
+	creq.Write(c2)
+	c2buf := bufio.NewReader(c2)
+	resp, err := http.ReadResponse(c2buf, creq)
+	if err != nil {
+		t.Fatal("Cannot CONNECT through proxy", err)
+	}
+	// if a CONNECT request is denited, goproxy returns a 502
+	if resp.StatusCode != 502 {
+		t.Fatal("response should have been denied", resp.StatusCode)
 	}
 }
 

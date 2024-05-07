@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -85,7 +86,6 @@ func (proxy *ProxyHttpServer) connectDialContext(ctx *ProxyCtx, network, addr st
 }
 
 func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request) {
-
 	ctx := &ProxyCtx{Req: r, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy}
 	hij, ok := w.(http.Hijacker)
 	if !ok {
@@ -289,6 +289,9 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						return
 					}
 					removeProxyHeaders(ctx, req)
+					if err := proxy.addBasicAuth(req); err != nil {
+						ctx.Warnf("Error adding basic auth credential to request %v", err)
+					}
 					resp, err = ctx.RoundTrip(req)
 					if err != nil {
 						ctx.Warnf("Cannot read TLS response from mitm'd server %v", err)
@@ -441,6 +444,9 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 				Host:   addr,
 				Header: make(http.Header),
 			}
+			if user := u.User; user != nil {
+				connectReq.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
+			}
 			if connectReqHandler != nil {
 				connectReqHandler(connectReq)
 			}
@@ -485,6 +491,9 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 				URL:    &url.URL{Opaque: addr},
 				Host:   addr,
 				Header: make(http.Header),
+			}
+			if user := u.User; user != nil {
+				connectReq.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 			}
 			if connectReqHandler != nil {
 				connectReqHandler(connectReq)
