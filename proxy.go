@@ -2,6 +2,7 @@ package goproxy
 
 import (
 	"bufio"
+	"encoding/base64"
 	"io"
 	"log"
 	"net"
@@ -102,6 +103,7 @@ func (proxy *ProxyHttpServer) filterRequest(r *http.Request, ctx *ProxyCtx) (req
 	}
 	return
 }
+
 func (proxy *ProxyHttpServer) filterResponse(respOrig *http.Response, ctx *ProxyCtx) (resp *http.Response) {
 	resp = respOrig
 	for _, h := range proxy.respHandlers {
@@ -109,6 +111,37 @@ func (proxy *ProxyHttpServer) filterResponse(respOrig *http.Response, ctx *Proxy
 		resp = h.Handle(resp, ctx)
 	}
 	return
+}
+
+func (proxy *ProxyHttpServer) addBasicAuth(r *http.Request) error {
+	if r.Header.Get("Authorization") != "" {
+		return nil
+	}
+
+	var err error
+	var url *url.URL
+	switch r.URL.Scheme {
+	case "http":
+		url, err = url.Parse(proxy.HttpProxyAddr)
+		if err != nil {
+			return err
+		}
+	case "https":
+		url, err = url.Parse(proxy.HttpsProxyAddr)
+		if err != nil {
+			return err
+		}
+	}
+
+	if url == nil {
+		return nil
+	}
+
+	if user := url.User; user != nil {
+		r.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
+	}
+
+	return nil
 }
 
 func removeProxyHeaders(ctx *ProxyCtx, r *http.Request) {
@@ -151,6 +184,9 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 		if resp == nil {
 			removeProxyHeaders(ctx, r)
+			if err := proxy.addBasicAuth(r); err != nil {
+				ctx.Warnf("Error adding basic auth credential to request %v", err)
+			}
 			resp, err = ctx.RoundTrip(r)
 			if err != nil {
 				ctx.Error = err
@@ -213,8 +249,8 @@ func WithHttpsProxyAddr(httpsProxyAddr string) ProxyHttpServerOptions {
 // NewProxyHttpServer creates and returns a proxy server, logging to stderr by default
 func NewProxyHttpServer(opts ...ProxyHttpServerOptions) *ProxyHttpServer {
 	appliedOpts := &options{
-		httpProxyAddr: "",
-		httpsProxyAddr:  "",
+		httpProxyAddr:  "",
+		httpsProxyAddr: "",
 	}
 	for _, opt := range opts {
 		opt.apply(appliedOpts)
@@ -237,15 +273,19 @@ func NewProxyHttpServer(opts ...ProxyHttpServerOptions) *ProxyHttpServer {
 	if appliedOpts.httpProxyAddr != "" {
 		proxy.HttpProxyAddr = appliedOpts.httpProxyAddr
 		httpProxyCfg.HTTPProxy = appliedOpts.httpProxyAddr
+	} else {
+		proxy.HttpProxyAddr = httpProxyCfg.HTTPProxy
 	}
 
 	if appliedOpts.httpsProxyAddr != "" {
 		proxy.HttpsProxyAddr = appliedOpts.httpsProxyAddr
 		httpProxyCfg.HTTPSProxy = appliedOpts.httpsProxyAddr
+	} else {
+		proxy.HttpsProxyAddr = httpProxyCfg.HTTPSProxy
 	}
 
 	proxy.ConnectDial = dialerFromProxy(&proxy)
-	
+
 	if appliedOpts.httpProxyAddr != "" || appliedOpts.httpsProxyAddr != "" {
 		proxy.Tr.Proxy = func(req *http.Request) (*url.URL, error) {
 			return httpProxyCfg.ProxyFunc()(req.URL)

@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"image"
 	"io"
 	"io/ioutil"
@@ -31,6 +32,20 @@ var noProxyClient = &http.Client{Transport: &http.Transport{TLSClientConfig: acc
 var https = httptest.NewTLSServer(nil)
 var srv = httptest.NewServer(nil)
 var fs = httptest.NewServer(http.FileServer(http.Dir(".")))
+
+const (
+	authUser = "user"
+	authPass = "pass"
+)
+
+var auth = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	user, pass, ok := r.BasicAuth()
+	if !ok || user != authUser || pass != authPass {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}))
 
 type QueryHandler struct{}
 
@@ -71,6 +86,14 @@ func getOrFail(url string, client *http.Client, t *testing.T) []byte {
 		t.Fatal("Can't fetch url", url, err)
 	}
 	return txt
+}
+
+func authURL() string {
+	url, err := url.Parse(auth.URL)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s://%s:%s@%s", url.Scheme, authUser, authPass, url.Host)
 }
 
 func localFile(url string) string { return fs.URL + "/" + url }
@@ -433,6 +456,33 @@ func TestSimpleMitm(t *testing.T) {
 	}
 	if resp := string(getOrFail(https.URL+"/query?result=bar", client, t)); resp != "bar" {
 		t.Error("Wrong response when mitm", resp, "expected bar")
+	}
+}
+
+func TestAuthed_Deny(t *testing.T) {
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpProxyAddr(auth.URL))
+
+	client, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	resp, err := client.Head("http://google.com")
+	panicOnErr(err, "resp to HEAD")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Error("Status should be a 401")
+	}
+}
+
+func TestAuthed_Pass(t *testing.T) {
+	fmt.Println(authURL())
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpProxyAddr(authURL()))
+
+	client, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	resp, err := client.Head("http://google.com")
+	panicOnErr(err, "resp to HEAD")
+	if resp.StatusCode != http.StatusOK {
+		t.Error("Status should be a 200")
 	}
 }
 
