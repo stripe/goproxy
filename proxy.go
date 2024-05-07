@@ -113,20 +113,20 @@ func (proxy *ProxyHttpServer) filterResponse(respOrig *http.Response, ctx *Proxy
 	return
 }
 
-func (proxy *ProxyHttpServer) addBasicAuth(r *http.Request) error {
-	if r.Header.Get("Authorization") != "" {
+func (proxy *ProxyHttpServer) addBasicAuth(r *http.Request, forceHTTPS bool) error {
+	if r.Header.Get("Proxy-Authorization") != "" || r.Header.Get("Authorization") != "" {
 		return nil
 	}
 
 	var err error
 	var parsed *url.URL
-	switch r.URL.Scheme {
-	case "http":
+	switch {
+	case r.URL.Scheme == "http":
 		parsed, err = url.Parse(proxy.HttpProxyAddr)
 		if err != nil {
 			return err
 		}
-	case "https":
+	case forceHTTPS || r.URL.Scheme == "https":
 		parsed, err = url.Parse(proxy.HttpsProxyAddr)
 		if err != nil {
 			return err
@@ -138,6 +138,7 @@ func (proxy *ProxyHttpServer) addBasicAuth(r *http.Request) error {
 	}
 
 	if user := parsed.User; user != nil {
+		r.Header.Set("Proxy-Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 		r.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 	}
 
@@ -184,7 +185,7 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 		if resp == nil {
 			removeProxyHeaders(ctx, r)
-			if err := proxy.addBasicAuth(r); err != nil {
+			if err := proxy.addBasicAuth(r, false); err != nil {
 				ctx.Warnf("Error adding basic auth credential to request %v", err)
 			}
 			resp, err = ctx.RoundTrip(r)

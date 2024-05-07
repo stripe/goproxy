@@ -217,6 +217,9 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 			}
 			req, resp := proxy.filterRequest(req, ctx)
 			if resp == nil {
+				if err := proxy.addBasicAuth(r, false); err != nil {
+					ctx.Warnf("Error adding basic auth credential to request %v", err)
+				}
 				if err := req.Write(targetSiteCon); err != nil {
 					httpError(proxyClient, ctx, err)
 					return
@@ -289,7 +292,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						return
 					}
 					removeProxyHeaders(ctx, req)
-					if err := proxy.addBasicAuth(req); err != nil {
+					if err := proxy.addBasicAuth(req, true); err != nil {
 						ctx.Warnf("Error adding basic auth credential to request %v", err)
 					}
 					resp, err = ctx.RoundTrip(req)
@@ -557,6 +560,9 @@ func (proxy *ProxyHttpServer) connectDialProxyWithContext(ctx *ProxyCtx, proxyHo
 		URL:    &url.URL{Opaque: host},
 		Host:   host,
 		Header: make(http.Header),
+	}
+	if err := proxy.addBasicAuth(connectReq, true); err != nil {
+		return nil, err
 	}
 	connectReq.Write(c)
 	// Read response.
