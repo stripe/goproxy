@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"image"
 	"io"
 	"io/ioutil"
@@ -31,6 +32,49 @@ var noProxyClient = &http.Client{Transport: &http.Transport{TLSClientConfig: acc
 var https = httptest.NewTLSServer(nil)
 var srv = httptest.NewServer(nil)
 var fs = httptest.NewServer(http.FileServer(http.Dir(".")))
+
+const (
+	authUser                 = "user"
+	authPass                 = "pass"
+	proxyAuthorizationHeader = "Proxy-Authorization"
+)
+
+func authed(r *http.Request) bool {
+	authheader := strings.SplitN(r.Header.Get(proxyAuthorizationHeader), " ", 2)
+	r.Header.Del(proxyAuthorizationHeader)
+	if len(authheader) != 2 || authheader[0] != "Basic" {
+		return false
+	}
+	userpassraw, err := base64.StdEncoding.DecodeString(authheader[1])
+	if err != nil {
+		return false
+	}
+	userpass := strings.SplitN(string(userpassraw), ":", 2)
+	if len(userpass) != 2 {
+		return false
+	}
+	user, pass := userpass[0], userpass[1]
+	if user != authUser && pass != authPass {
+		return false
+	}
+	return true
+}
+
+var auth = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	if !authed(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}))
+
+var authTLS = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	if !authed(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}))
 
 type QueryHandler struct{}
 
@@ -71,6 +115,22 @@ func getOrFail(url string, client *http.Client, t *testing.T) []byte {
 		t.Fatal("Can't fetch url", url, err)
 	}
 	return txt
+}
+
+func authURL() string {
+	url, err := url.Parse(auth.URL)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s://%s:%s@%s", url.Scheme, authUser, authPass, url.Host)
+}
+
+func authTLSURL() string {
+	url, err := url.Parse(authTLS.URL)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s://%s:%s@%s", url.Scheme, authUser, authPass, url.Host)
 }
 
 func localFile(url string) string { return fs.URL + "/" + url }
@@ -433,6 +493,94 @@ func TestSimpleMitm(t *testing.T) {
 	}
 	if resp := string(getOrFail(https.URL+"/query?result=bar", client, t)); resp != "bar" {
 		t.Error("Wrong response when mitm", resp, "expected bar")
+	}
+}
+
+func TestAuthed_Deny(t *testing.T) {
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpProxyAddr(auth.URL))
+
+	client, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	resp, err := client.Head("http://google.com")
+	panicOnErr(err, "resp to HEAD")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Error("Status should be a 401")
+	}
+}
+
+func TestAuthed_Pass(t *testing.T) {
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpProxyAddr(authURL()))
+
+	client, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	resp, err := client.Head("http://google.com")
+	panicOnErr(err, "resp to HEAD")
+	if resp.StatusCode != http.StatusOK {
+		t.Error("Status should be a 200")
+	}
+}
+
+func TestAuthed_HTTPS(t *testing.T) {
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpsProxyAddr(authTLSURL()))
+	proxy.OnRequest(goproxy.ReqHostIs("https://foo")).HandleConnect(goproxy.AlwaysMitm)
+
+	_, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	c, err := tls.Dial("tcp", https.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal("cannot dial to tcp server", err)
+	}
+	c.Close()
+
+	c2, err := net.Dial("tcp", l.Listener.Addr().String())
+	if err != nil {
+		t.Fatal("dialing to proxy", err)
+	}
+	creq, err := http.NewRequest("CONNECT", https.URL, nil)
+	if err != nil {
+		t.Fatal("create new request", creq)
+	}
+	creq.Write(c2)
+	c2buf := bufio.NewReader(c2)
+	resp, err := http.ReadResponse(c2buf, creq)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("Cannot CONNECT through proxy %v %d", err, resp.StatusCode)
+	}
+}
+
+func TestAuthed_HTTPSDeny(t *testing.T) {
+	proxy := goproxy.NewProxyHttpServer(goproxy.WithHttpsProxyAddr(authTLS.URL))
+	proxy.OnRequest(goproxy.ReqHostIs("https://foo")).HandleConnect(goproxy.AlwaysMitm)
+
+	_, l := oneShotProxy(proxy, t)
+	defer l.Close()
+
+	c, err := tls.Dial("tcp", https.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal("cannot dial to tcp server", err)
+	}
+	c.Close()
+
+	c2, err := net.Dial("tcp", l.Listener.Addr().String())
+	if err != nil {
+		t.Fatal("dialing to proxy", err)
+	}
+	creq, err := http.NewRequest("CONNECT", https.URL, nil)
+	if err != nil {
+		t.Fatal("create new request", creq)
+	}
+	creq.Write(c2)
+	c2buf := bufio.NewReader(c2)
+	resp, err := http.ReadResponse(c2buf, creq)
+	if err != nil {
+		t.Fatal("Cannot CONNECT through proxy", err)
+	}
+	// if a CONNECT request is denited, goproxy returns a 502
+	if resp.StatusCode != 502 {
+		t.Fatal("response should have been denied", resp.StatusCode)
 	}
 }
 

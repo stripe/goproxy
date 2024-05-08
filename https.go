@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -85,7 +86,6 @@ func (proxy *ProxyHttpServer) connectDialContext(ctx *ProxyCtx, network, addr st
 }
 
 func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request) {
-
 	ctx := &ProxyCtx{Req: r, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy}
 	hij, ok := w.(http.Hijacker)
 	if !ok {
@@ -217,6 +217,9 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 			}
 			req, resp := proxy.filterRequest(req, ctx)
 			if resp == nil {
+				if err := proxy.addBasicAuth(r, false); err != nil {
+					ctx.Warnf("Error adding basic auth credential to request %v", err)
+				}
 				if err := req.Write(targetSiteCon); err != nil {
 					httpError(proxyClient, ctx, err)
 					return
@@ -264,7 +267,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 				// Set the RoundTripper on the ProxyCtx within the `HandleConnect` action of goproxy, then
 				// inject the roundtripper here in order to use a custom round tripper while mitm.
 				var ctx = &ProxyCtx{Req: req, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy, UserData: ctx.UserData, RoundTripper: ctx.RoundTripper}
-				if err != nil && err != io.EOF {
+				if err != nil && errors.Is(err, io.EOF) {
 					return
 				}
 				if err != nil {
@@ -289,6 +292,9 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 						return
 					}
 					removeProxyHeaders(ctx, req)
+					if err := proxy.addBasicAuth(req, true); err != nil {
+						ctx.Warnf("Error adding basic auth credential to request %v", err)
+					}
 					resp, err = ctx.RoundTrip(req)
 					if err != nil {
 						ctx.Warnf("Cannot read TLS response from mitm'd server %v", err)
@@ -441,6 +447,9 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 				Host:   addr,
 				Header: make(http.Header),
 			}
+			if user := u.User; user != nil {
+				connectReq.Header.Set("Proxy-Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
+			}
 			if connectReqHandler != nil {
 				connectReqHandler(connectReq)
 			}
@@ -485,6 +494,9 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 				URL:    &url.URL{Opaque: addr},
 				Host:   addr,
 				Header: make(http.Header),
+			}
+			if user := u.User; user != nil {
+				connectReq.Header.Set("Proxy-Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 			}
 			if connectReqHandler != nil {
 				connectReqHandler(connectReq)
@@ -549,6 +561,9 @@ func (proxy *ProxyHttpServer) connectDialProxyWithContext(ctx *ProxyCtx, proxyHo
 		Host:   host,
 		Header: make(http.Header),
 	}
+	if err := proxy.addBasicAuth(connectReq, true); err != nil {
+		return nil, err
+	}
 	connectReq.Write(c)
 	// Read response.
 	// Okay to use and discard buffered reader here, because
@@ -605,5 +620,8 @@ func httpsProxyAddr(reqURL *url.URL, httpsProxy string) (string, error) {
 		service = proxyURL.Scheme
 	}
 
+	if proxyURL.User != nil {
+		return fmt.Sprintf("%s://%s@%s:%s", proxyURL.Scheme, proxyURL.User.String(), proxyURL.Hostname(), service), nil
+	}
 	return fmt.Sprintf("%s://%s:%s", proxyURL.Scheme, proxyURL.Hostname(), service), nil
 }
