@@ -34,13 +34,34 @@ var srv = httptest.NewServer(nil)
 var fs = httptest.NewServer(http.FileServer(http.Dir(".")))
 
 const (
-	authUser = "user"
-	authPass = "pass"
+	authUser                 = "user"
+	authPass                 = "pass"
+	proxyAuthorizationHeader = "Proxy-Authorization"
 )
 
+func authed(r *http.Request) bool {
+	authheader := strings.SplitN(r.Header.Get(proxyAuthorizationHeader), " ", 2)
+	r.Header.Del(proxyAuthorizationHeader)
+	if len(authheader) != 2 || authheader[0] != "Basic" {
+		return false
+	}
+	userpassraw, err := base64.StdEncoding.DecodeString(authheader[1])
+	if err != nil {
+		return false
+	}
+	userpass := strings.SplitN(string(userpassraw), ":", 2)
+	if len(userpass) != 2 {
+		return false
+	}
+	user, pass := userpass[0], userpass[1]
+	if user != authUser && pass != authPass {
+		return false
+	}
+	return true
+}
+
 var auth = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	user, pass, ok := r.BasicAuth()
-	if !ok || user != authUser || pass != authPass {
+	if !authed(r) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -48,8 +69,7 @@ var auth = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *ht
 }))
 
 var authTLS = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	user, pass, ok := r.BasicAuth()
-	if !ok || user != authUser || pass != authPass {
+	if !authed(r) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -527,7 +547,7 @@ func TestAuthed_HTTPS(t *testing.T) {
 	c2buf := bufio.NewReader(c2)
 	resp, err := http.ReadResponse(c2buf, creq)
 	if err != nil || resp.StatusCode != 200 {
-		t.Fatal("Cannot CONNECT through proxy", err)
+		t.Fatalf("Cannot CONNECT through proxy %v %d", err, resp.StatusCode)
 	}
 }
 

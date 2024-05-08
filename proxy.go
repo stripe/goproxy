@@ -114,7 +114,7 @@ func (proxy *ProxyHttpServer) filterResponse(respOrig *http.Response, ctx *Proxy
 }
 
 func (proxy *ProxyHttpServer) addBasicAuth(r *http.Request, forceHTTPS bool) error {
-	if r.Header.Get("Proxy-Authorization") != "" || r.Header.Get("Authorization") != "" {
+	if r.Header.Get("Proxy-Authorization") != "" {
 		return nil
 	}
 
@@ -139,7 +139,6 @@ func (proxy *ProxyHttpServer) addBasicAuth(r *http.Request, forceHTTPS bool) err
 
 	if user := parsed.User; user != nil {
 		r.Header.Set("Proxy-Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
-		r.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 	}
 
 	return nil

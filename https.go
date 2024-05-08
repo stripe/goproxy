@@ -267,7 +267,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 				// Set the RoundTripper on the ProxyCtx within the `HandleConnect` action of goproxy, then
 				// inject the roundtripper here in order to use a custom round tripper while mitm.
 				var ctx = &ProxyCtx{Req: req, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy, UserData: ctx.UserData, RoundTripper: ctx.RoundTripper}
-				if err != nil && err != io.EOF {
+				if err != nil && errors.Is(err, io.EOF) {
 					return
 				}
 				if err != nil {
@@ -448,7 +448,7 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 				Header: make(http.Header),
 			}
 			if user := u.User; user != nil {
-				connectReq.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
+				connectReq.Header.Set("Proxy-Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 			}
 			if connectReqHandler != nil {
 				connectReqHandler(connectReq)
@@ -496,7 +496,7 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 				Header: make(http.Header),
 			}
 			if user := u.User; user != nil {
-				connectReq.Header.Set("Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
+				connectReq.Header.Set("Proxy-Authorization", "Basic "+base64.URLEncoding.EncodeToString([]byte(user.String())))
 			}
 			if connectReqHandler != nil {
 				connectReqHandler(connectReq)
