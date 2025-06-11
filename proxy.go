@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"sync/atomic"
 
 	"golang.org/x/net/http/httpproxy"
@@ -193,7 +194,8 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		copyHeaders(w.Header(), resp.Header, proxy.KeepDestinationHeaders)
 		w.WriteHeader(resp.StatusCode)
 		var copyWriter io.Writer = w
-		if w.Header().Get("content-type") == "text/event-stream" {
+		contentType := w.Header().Get("content-type")
+		if strings.Contains(contentType, "text/event-stream") {
 			// server-side events, flush the buffered data to the client.
 			copyWriter = &flushWriter{w: w}
 		}
