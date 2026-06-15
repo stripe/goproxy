@@ -780,11 +780,7 @@ func TestHttpProxyAddrsFromEnv(t *testing.T) {
 func TestOverrideHttpsProxyAddrsFromEnvWithRequest(t *testing.T) {
 	// The request essentially does:
 	// Client -> FakeStripeEgressProxy -> FakeExternalProxy -> FinalDestination
-	finalDestination := httptest.NewTLSServer(HeadersHandler{})
-	defer finalDestination.Close()
-
-	finalDestinationHost := "final.destination.test"
-	finalDestinationURL := "https://" + finalDestinationHost + "/headers"
+	finalDestinationUrl := "https://httpbin.org/get"
 
 	// We'll use this counter to mark whether FakeStripeEgressProxy has been called
 	c := 0
@@ -797,15 +793,7 @@ func TestOverrideHttpsProxyAddrsFromEnvWithRequest(t *testing.T) {
 	// os.Setenv("https_proxy", "http://incorrectproxy.com")
 
 	fakeExternalProxy := goproxy.NewProxyHttpServer()
-	fakeExternalProxy.Tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if addr == finalDestinationHost+":443" {
-			addr = finalDestination.Listener.Addr().String()
-		}
-		var dialer net.Dialer
-		return dialer.DialContext(ctx, network, addr)
-	}
 	fakeExternalProxyTestStruct := httptest.NewServer(fakeExternalProxy)
-	defer fakeExternalProxyTestStruct.Close()
 	var AlwaysMitmAndPassthrough goproxy.FuncHttpsHandler = func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 		if ctx.Req.Header["Proxy-Authorization"][0] != "Basic dGVzdHVzZXI6dGVzdHBhc3N3b3Jk" {
 			t.Error("Expected the Proxy-Authorization header to be present in the CONNECT request!")
@@ -825,7 +813,6 @@ func TestOverrideHttpsProxyAddrsFromEnvWithRequest(t *testing.T) {
 	// We set the CONNECT response handler function to increment our counter such that we can tell
 	// if our FakeStripeEgressProxy was actually called
 	fakeStripeEgressProxyTestStruct := httptest.NewServer(fakeStripeEgressProxy)
-	defer fakeStripeEgressProxyTestStruct.Close()
 
 	egressProxyUrl, _ := url.Parse(fakeStripeEgressProxyTestStruct.URL)
 	externalProxyUrl, _ := url.Parse(fakeExternalProxyTestStruct.URL)
@@ -850,7 +837,7 @@ func TestOverrideHttpsProxyAddrsFromEnvWithRequest(t *testing.T) {
 	}
 	client := &http.Client{Transport: tr}
 
-	req, err := http.NewRequest("GET", finalDestinationURL, nil)
+	req, err := http.NewRequest("GET", finalDestinationUrl, nil)
 	if err != nil {
 		t.Fatal("Unable to construct request!")
 	}
@@ -861,7 +848,6 @@ func TestOverrideHttpsProxyAddrsFromEnvWithRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal("Unable to make the request!")
 	}
-	defer res.Body.Close()
 
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -870,7 +856,7 @@ func TestOverrideHttpsProxyAddrsFromEnvWithRequest(t *testing.T) {
 	resBody := string(bodyBytes)
 
 	// Making sure we received the response we expected from the final destination
-	if !strings.Contains(resBody, "X-Test-Header-Key: Test-Header-Value;") {
+	if !strings.Contains(resBody, "\"X-Test-Header-Key\": \"Test-Header-Value\"") {
 		t.Error("Expected the passed request headers to be present in the response body!")
 	}
 
