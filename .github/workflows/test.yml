@@ -1,7 +1,5 @@
 on: [push, pull_request]
 name: Test
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
 jobs:
   test:
     strategy:
@@ -11,11 +9,11 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
     - name: Install Go
-      uses: actions/setup-go@v1
+      uses: actions/setup-go@v6
       with:
         go-version: ${{ matrix.go-version }}
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v6
     - name: Test
       run: |
         go mod verify
