@@ -3,6 +3,7 @@ package goproxy
 import (
 	"bufio"
 	"bytes"
+	"container/list"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -17,9 +18,20 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/http/httpproxy"
+)
+
+const (
+	// DefaultMITMCertCacheMaxEntries limits the number of generated MITM leaf
+	// certificates cached by TLSConfigFromCA.
+	DefaultMITMCertCacheMaxEntries = 4096
+	// DefaultMITMCertCacheTTL controls how long TLSConfigFromCA reuses a generated
+	// MITM leaf certificate for a host.
+	DefaultMITMCertCacheTTL = time.Hour
 )
 
 type ConnectActionLiteral int
@@ -537,14 +549,115 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 	return nil
 }
 
+type mitmCertCache struct {
+	mu         sync.Mutex
+	maxEntries int
+	ttl        time.Duration
+	now        func() time.Time
+	entries    map[string]*list.Element
+	lru        *list.List
+}
+
+type mitmCertCacheEntry struct {
+	host      string
+	cert      tls.Certificate
+	expiresAt time.Time
+}
+
+func newMITMCertCache(maxEntries int, ttl time.Duration) *mitmCertCache {
+	if maxEntries <= 0 || ttl <= 0 {
+		return nil
+	}
+	return &mitmCertCache{
+		maxEntries: maxEntries,
+		ttl:        ttl,
+		now:        time.Now,
+		entries:    make(map[string]*list.Element),
+		lru:        list.New(),
+	}
+}
+
+func (c *mitmCertCache) get(host string) (tls.Certificate, bool) {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	elem, ok := c.entries[host]
+	if !ok {
+		return tls.Certificate{}, false
+	}
+	entry := elem.Value.(*mitmCertCacheEntry)
+	if !entry.expiresAt.After(now) {
+		c.removeElement(elem)
+		return tls.Certificate{}, false
+	}
+	c.lru.MoveToFront(elem)
+	return entry.cert, true
+}
+
+func (c *mitmCertCache) store(host string, cert tls.Certificate) tls.Certificate {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if elem, ok := c.entries[host]; ok {
+		entry := elem.Value.(*mitmCertCacheEntry)
+		if entry.expiresAt.After(now) {
+			c.lru.MoveToFront(elem)
+			return entry.cert
+		}
+		c.removeElement(elem)
+	}
+
+	entry := &mitmCertCacheEntry{
+		host:      host,
+		cert:      cert,
+		expiresAt: now.Add(c.ttl),
+	}
+	c.entries[host] = c.lru.PushFront(entry)
+	for c.lru.Len() > c.maxEntries {
+		c.removeElement(c.lru.Back())
+	}
+	return cert
+}
+
+func (c *mitmCertCache) removeElement(elem *list.Element) {
+	if elem == nil {
+		return
+	}
+	entry := elem.Value.(*mitmCertCacheEntry)
+	delete(c.entries, entry.host)
+	c.lru.Remove(elem)
+}
+
 func TLSConfigFromCA(ca *tls.Certificate) func(host string, ctx *ProxyCtx) (*tls.Config, error) {
+	return TLSConfigFromCAWithCache(ca, DefaultMITMCertCacheMaxEntries, DefaultMITMCertCacheTTL)
+}
+
+// TLSConfigFromCAWithCache returns a TLS config generator that signs MITM leaf
+// certificates with ca and reuses generated certificates for the same host while
+// they remain in the bounded TTL cache. Set cacheMaxEntries or cacheTTL to zero
+// to disable caching.
+func TLSConfigFromCAWithCache(ca *tls.Certificate, cacheMaxEntries int, cacheTTL time.Duration) func(host string, ctx *ProxyCtx) (*tls.Config, error) {
+	certCache := newMITMCertCache(cacheMaxEntries, cacheTTL)
 	return func(host string, ctx *ProxyCtx) (*tls.Config, error) {
 		config := defaultTLSConfig.Clone()
-		ctx.Logf("signing for %s", stripPort(host))
-		cert, err := signHost(*ca, []string{stripPort(host)})
+		strippedHost := stripPort(host)
+		if certCache != nil {
+			if cert, ok := certCache.get(strippedHost); ok {
+				config.Certificates = append(config.Certificates, cert)
+				return config, nil
+			}
+		}
+
+		ctx.Logf("signing for %s", strippedHost)
+		cert, err := signHost(*ca, []string{strippedHost})
 		if err != nil {
 			ctx.Warnf("Cannot sign host certificate with provided CA: %s", err)
 			return nil, err
+		}
+		if certCache != nil {
+			cert = certCache.store(strippedHost, cert)
 		}
 		config.Certificates = append(config.Certificates, cert)
 		return config, nil
