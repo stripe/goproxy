@@ -1,3 +1,6 @@
+# github.com/hashicorp/golang-lru v1.0.2
+github.com/hashicorp/golang-lru
+github.com/hashicorp/golang-lru/simplelru
 # github.com/rogpeppe/go-charset v0.0.0-20190617161244-0dc95cdf6f31
 github.com/rogpeppe/go-charset/charset
 github.com/rogpeppe/go-charset/data

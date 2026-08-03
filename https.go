@@ -3,7 +3,6 @@ package goproxy
 import (
 	"bufio"
 	"bytes"
-	"container/list"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -22,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru"
 	"golang.org/x/net/http/httpproxy"
 )
 
@@ -550,16 +550,13 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 }
 
 type mitmCertCache struct {
-	mu         sync.Mutex
-	maxEntries int
-	ttl        time.Duration
-	now        func() time.Time
-	entries    map[string]*list.Element
-	lru        *list.List
+	mu      sync.Mutex
+	ttl     time.Duration
+	now     func() time.Time
+	entries *lru.Cache
 }
 
 type mitmCertCacheEntry struct {
-	host      string
 	cert      tls.Certificate
 	expiresAt time.Time
 }
@@ -568,66 +565,52 @@ func newMITMCertCache(maxEntries int, ttl time.Duration) *mitmCertCache {
 	if maxEntries <= 0 || ttl <= 0 {
 		return nil
 	}
+	entries, err := lru.New(maxEntries)
+	if err != nil {
+		return nil
+	}
 	return &mitmCertCache{
-		maxEntries: maxEntries,
-		ttl:        ttl,
-		now:        time.Now,
-		entries:    make(map[string]*list.Element),
-		lru:        list.New(),
+		ttl:     ttl,
+		now:     time.Now,
+		entries: entries,
 	}
 }
 
 func (c *mitmCertCache) get(host string) (tls.Certificate, bool) {
-	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	elem, ok := c.entries[host]
+	value, ok := c.entries.Get(host)
 	if !ok {
 		return tls.Certificate{}, false
 	}
-	entry := elem.Value.(*mitmCertCacheEntry)
-	if !entry.expiresAt.After(now) {
-		c.removeElement(elem)
+	entry := value.(mitmCertCacheEntry)
+	if !entry.expiresAt.After(c.now()) {
+		c.entries.Remove(host)
 		return tls.Certificate{}, false
 	}
-	c.lru.MoveToFront(elem)
 	return entry.cert, true
 }
 
 func (c *mitmCertCache) store(host string, cert tls.Certificate) tls.Certificate {
-	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if elem, ok := c.entries[host]; ok {
-		entry := elem.Value.(*mitmCertCacheEntry)
+	now := c.now()
+	if value, ok := c.entries.Get(host); ok {
+		entry := value.(mitmCertCacheEntry)
 		if entry.expiresAt.After(now) {
-			c.lru.MoveToFront(elem)
 			return entry.cert
 		}
-		c.removeElement(elem)
+		c.entries.Remove(host)
 	}
 
-	entry := &mitmCertCacheEntry{
-		host:      host,
+	entry := mitmCertCacheEntry{
 		cert:      cert,
 		expiresAt: now.Add(c.ttl),
 	}
-	c.entries[host] = c.lru.PushFront(entry)
-	for c.lru.Len() > c.maxEntries {
-		c.removeElement(c.lru.Back())
-	}
+	c.entries.Add(host, entry)
 	return cert
-}
-
-func (c *mitmCertCache) removeElement(elem *list.Element) {
-	if elem == nil {
-		return
-	}
-	entry := elem.Value.(*mitmCertCacheEntry)
-	delete(c.entries, entry.host)
-	c.lru.Remove(elem)
 }
 
 func TLSConfigFromCA(ca *tls.Certificate) func(host string, ctx *ProxyCtx) (*tls.Config, error) {
