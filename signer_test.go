@@ -67,6 +67,21 @@ func TestMITMCertCacheReturnsStoredCertificate(t *testing.T) {
 	}
 }
 
+func TestMITMCertCacheDuplicateStoreRefreshesTTL(t *testing.T) {
+	now := time.Unix(100, 0)
+	cache := newMITMCertCache(2, time.Hour)
+	cache.now = func() time.Time { return now }
+
+	cache.store("example.com", testTLSCertificate(1))
+	now = now.Add(30 * time.Minute)
+	cache.store("example.com", testTLSCertificate(2))
+
+	now = now.Add(31 * time.Minute)
+	if got, ok := cache.get("example.com"); !ok || got.Certificate[0][0] != 1 {
+		t.Fatalf("expected cached certificate 1 after refreshed TTL, got %v, ok=%v", got.Certificate, ok)
+	}
+}
+
 func TestMITMCertCacheEvictsLeastRecentlyUsedCertificate(t *testing.T) {
 	cache := newMITMCertCache(2, time.Hour)
 	cache.store("first.example", testTLSCertificate(1))

@@ -600,6 +600,8 @@ func (c *mitmCertCache) store(host string, cert tls.Certificate) tls.Certificate
 	if value, ok := c.entries.Get(host); ok {
 		entry := value.(mitmCertCacheEntry)
 		if entry.expiresAt.After(now) {
+			entry.expiresAt = now.Add(c.ttl)
+			c.entries.Add(host, entry)
 			return entry.cert
 		}
 		c.entries.Remove(host)
