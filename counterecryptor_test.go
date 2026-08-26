@@ -2,7 +2,10 @@ package goproxy_test
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"io"
 	"math"
@@ -12,20 +15,47 @@ import (
 	"github.com/stripe/goproxy"
 )
 
-type RandSeedReader struct {
-	r rand.Rand
+func testRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	k, ok := goproxy.GoproxyCa.PrivateKey.(*rsa.PrivateKey)
+	if !ok {
+		t.Fatalf("expected RSA private key, got %T", goproxy.GoproxyCa.PrivateKey)
+	}
+	return k
 }
 
-func (r *RandSeedReader) Read(b []byte) (n int, err error) {
-	for i := range b {
-		b[i] = byte(r.r.Int() & 0xFF)
+func TestCounterEncUsesSHA256KeyAndSeed(t *testing.T) {
+	k := testRSAKey(t)
+	seed := []byte("the quick brown fox run over the lazy dog")
+	c, err := goproxy.NewCounterEncryptorRandFromKey(k, seed)
+	fatalOnErr(err, "NewCounterEncryptorRandFromKey", t)
+
+	got := make([]byte, aes.BlockSize)
+	_, err = io.ReadFull(&c, got)
+	fatalOnErr(err, "CounterEncryptorRand.Read", t)
+
+	keyBytes := x509.MarshalPKCS1PrivateKey(k)
+	keyDigest := sha256.Sum256(keyBytes)
+	seedDigest := sha256.Sum256(seed)
+	block, err := aes.NewCipher(keyDigest[:aes.BlockSize])
+	fatalOnErr(err, "aes.NewCipher", t)
+	expected := make([]byte, aes.BlockSize)
+	block.Encrypt(expected, seedDigest[:aes.BlockSize])
+	if !bytes.Equal(got, expected) {
+		t.Fatalf("CounterEncryptorRand did not use SHA-256-derived key and seed")
 	}
-	return len(b), nil
+
+	legacyBlock, err := aes.NewCipher(keyBytes[:aes.BlockSize])
+	fatalOnErr(err, "aes.NewCipher legacy", t)
+	legacy := make([]byte, aes.BlockSize)
+	legacyBlock.Encrypt(legacy, seed[:aes.BlockSize])
+	if bytes.Equal(got, legacy) {
+		t.Fatalf("CounterEncryptorRand used raw key and seed prefixes")
+	}
 }
 
 func TestCounterEncDifferentConsecutive(t *testing.T) {
-	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 128)
-	fatalOnErr(err, "rsa.GenerateKey", t)
+	k := testRSAKey(t)
 	c, err := goproxy.NewCounterEncryptorRandFromKey(k, []byte("the quick brown fox run over the lazy dog"))
 	fatalOnErr(err, "NewCounterEncryptorRandFromKey", t)
 	for i := 0; i < 100*1000; i++ {
@@ -39,8 +69,7 @@ func TestCounterEncDifferentConsecutive(t *testing.T) {
 }
 
 func TestCounterEncIdenticalStreams(t *testing.T) {
-	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 128)
-	fatalOnErr(err, "rsa.GenerateKey", t)
+	k := testRSAKey(t)
 	c1, err := goproxy.NewCounterEncryptorRandFromKey(k, []byte("the quick brown fox run over the lazy dog"))
 	fatalOnErr(err, "NewCounterEncryptorRandFromKey", t)
 	c2, err := goproxy.NewCounterEncryptorRandFromKey(k, []byte("the quick brown fox run over the lazy dog"))
@@ -76,8 +105,7 @@ func stddev(data []int) float64 {
 }
 
 func TestCounterEncStreamHistogram(t *testing.T) {
-	k, err := rsa.GenerateKey(&RandSeedReader{*rand.New(rand.NewSource(0xFF43109))}, 128)
-	fatalOnErr(err, "rsa.GenerateKey", t)
+	k := testRSAKey(t)
 	c, err := goproxy.NewCounterEncryptorRandFromKey(k, []byte("the quick brown fox run over the lazy dog"))
 	fatalOnErr(err, "NewCounterEncryptorRandFromKey", t)
 	nout := 100 * 1000
