@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"sync/atomic"
 
 	"golang.org/x/net/http/httpproxy"
@@ -148,6 +149,20 @@ func removeProxyHeaders(ctx *ProxyCtx, r *http.Request) {
 	r.Header.Del("Connection")
 }
 
+type flushWriter struct {
+	w io.Writer
+}
+
+func (fw flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if f, ok := fw.w.(http.Flusher); ok {
+		// only flush if the Writer implements the Flusher interface.
+		f.Flush()
+	}
+
+	return n, err
+}
+
 // Standard net/http function. Shouldn't be used directly, http.Serve will use it.
 func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//r.Header["X-Forwarded-For"] = w.RemoteAddr()
@@ -193,7 +208,14 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		}
 		copyHeaders(w.Header(), resp.Header, proxy.KeepDestinationHeaders)
 		w.WriteHeader(resp.StatusCode)
-		nr, err := io.Copy(w, resp.Body)
+		var copyWriter io.Writer = w
+		contentType := w.Header().Get("content-type")
+		if strings.Contains(contentType, "text/event-stream") {
+			// server-side events, flush the buffered data to the client.
+			copyWriter = &flushWriter{w: w}
+		}
+
+		nr, err := io.Copy(copyWriter, resp.Body)
 		if err := resp.Body.Close(); err != nil {
 			ctx.Warnf("Can't close response body %v", err)
 		}
