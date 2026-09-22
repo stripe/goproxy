@@ -14,8 +14,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	gocache "github.com/patrickmn/go-cache"
 )
 
 func orFatal(msg string, err error, t *testing.T) {
@@ -72,39 +70,37 @@ func TestMITMCertCacheReturnsStoredCertificate(t *testing.T) {
 }
 
 func TestMITMCertCacheDuplicateStoreRefreshesTTL(t *testing.T) {
+	now := time.Unix(100, 0)
 	cache := newMITMCertCache(1, time.Hour)
+	cache.now = func() time.Time { return now }
 
-	// Shorten the existing entry's TTL to simulate a certificate stored earlier.
 	cache.store("example.com", testTLSCertificate(1))
-	cache.entries.Set("example.com", testTLSCertificate(1), time.Minute)
-	before := time.Now()
+	now = now.Add(30 * time.Minute)
 	cache.store("example.com", testTLSCertificate(2))
-	after := time.Now()
 
+	now = now.Add(31 * time.Minute)
 	if got, ok := cache.get("example.com"); !ok || got.Certificate[0][0] != 1 {
 		t.Fatalf("expected cached certificate 1 after refreshed TTL, got %v, ok=%v", got.Certificate, ok)
 	}
-	_, expiresAt, ok := cache.entries.GetWithExpiration("example.com")
-	if !ok || expiresAt.Before(before.Add(time.Hour)) || expiresAt.After(after.Add(time.Hour)) {
-		t.Fatalf("expected duplicate store to refresh TTL to one hour, got expiration %v, ok=%v", expiresAt, ok)
+	now = now.Add(29 * time.Minute)
+	if _, ok := cache.get("example.com"); ok {
+		t.Fatal("expected certificate to expire one hour after the duplicate store")
 	}
 }
 
 func TestMITMCertCacheLookupDoesNotRefreshTTL(t *testing.T) {
+	now := time.Unix(100, 0)
 	cache := newMITMCertCache(2, time.Hour)
-	before := time.Now()
+	cache.now = func() time.Time { return now }
 	cache.store("example.com", testTLSCertificate(1))
-	after := time.Now()
 
-	_, expiresAt, ok := cache.entries.GetWithExpiration("example.com")
-	if !ok || expiresAt.Before(before.Add(time.Hour)) || expiresAt.After(after.Add(time.Hour)) {
-		t.Fatalf("expected stored certificate to have a one-hour TTL, got expiration %v, ok=%v", expiresAt, ok)
-	}
+	now = now.Add(time.Hour - time.Nanosecond)
 	if _, ok := cache.get("example.com"); !ok {
 		t.Fatal("expected example.com to be cached")
 	}
-	if _, got, ok := cache.entries.GetWithExpiration("example.com"); !ok || !got.Equal(expiresAt) {
-		t.Fatalf("expected lookup to leave expiration unchanged at %v, got %v, ok=%v", expiresAt, got, ok)
+	now = now.Add(time.Nanosecond)
+	if _, ok := cache.get("example.com"); ok {
+		t.Fatal("expected certificate to expire at its original TTL despite the lookup")
 	}
 }
 
@@ -132,7 +128,7 @@ func TestMITMCertCacheEvictsLeastRecentlyUsedCertificate(t *testing.T) {
 			if got, ok := cache.get("third.example"); !ok || got.Certificate[0][0] != 3 {
 				t.Fatalf("expected third.example to be cached, got %v, ok=%v", got.Certificate, ok)
 			}
-			if got := cache.entries.ItemCount(); got != 2 {
+			if got := len(cache.entries); got != 2 {
 				t.Fatalf("expected exactly 2 stored entries, got %d", got)
 			}
 		})
@@ -142,21 +138,17 @@ func TestMITMCertCacheEvictsLeastRecentlyUsedCertificate(t *testing.T) {
 func TestMITMCertCacheExpiresCertificates(t *testing.T) {
 	for _, lookupFirst := range []bool{false, true} {
 		t.Run("lookupFirst="+strconv.FormatBool(lookupFirst), func(t *testing.T) {
+			now := time.Unix(100, 0)
 			cache := newMITMCertCache(1, time.Minute)
+			cache.now = func() time.Time { return now }
 			cache.store("example.com", testTLSCertificate(1))
-			// Seed an expired entry without waiting for wall-clock expiry.
-			cache.entries = gocache.NewFrom(time.Minute, 0, map[string]gocache.Item{
-				"example.com": {
-					Object:     testTLSCertificate(1),
-					Expiration: time.Now().Add(-time.Minute).UnixNano(),
-				},
-			})
+			now = now.Add(time.Minute)
 
 			if lookupFirst {
 				if _, ok := cache.get("example.com"); ok {
 					t.Fatal("expected expired certificate to be a cache miss")
 				}
-				if cache.entries.ItemCount() != 0 || cache.recent.Len() != 0 || len(cache.positions) != 0 {
+				if len(cache.entries) != 0 || cache.recent.Len() != 0 {
 					t.Fatal("expected expired lookup to remove the certificate and its eviction bookkeeping")
 				}
 			}
@@ -164,7 +156,7 @@ func TestMITMCertCacheExpiresCertificates(t *testing.T) {
 			if got, ok := cache.get("example.com"); !ok || got.Certificate[0][0] != 2 {
 				t.Fatalf("expected replacement certificate 2, got %v, ok=%v", got.Certificate, ok)
 			}
-			if cache.entries.ItemCount() != 1 || cache.recent.Len() != 1 || len(cache.positions) != 1 {
+			if len(cache.entries) != 1 || cache.recent.Len() != 1 {
 				t.Fatal("expected replacement to occupy exactly one cache and eviction-order entry")
 			}
 		})
@@ -209,7 +201,10 @@ func TestMITMCertCacheConcurrentAccessRemainsBounded(t *testing.T) {
 			for j := 0; j < 20; j++ {
 				cache.store(host, testTLSCertificate(byte(id)))
 				cache.get(host)
-				if got := cache.entries.ItemCount(); got > maxEntries {
+				cache.mu.Lock()
+				got := len(cache.entries)
+				cache.mu.Unlock()
+				if got > maxEntries {
 					t.Errorf("cache exceeded its capacity of %d: got %d entries", maxEntries, got)
 				}
 			}
@@ -218,11 +213,11 @@ func TestMITMCertCacheConcurrentAccessRemainsBounded(t *testing.T) {
 	close(start)
 	writers.Wait()
 
-	if got := cache.entries.ItemCount(); got != maxEntries {
+	if got := len(cache.entries); got != maxEntries {
 		t.Fatalf("expected %d entries after filling the cache, got %d", maxEntries, got)
 	}
-	if cache.recent.Len() != maxEntries || len(cache.positions) != maxEntries {
-		t.Fatalf("eviction bookkeeping does not match capacity: %d list entries, %d positions", cache.recent.Len(), len(cache.positions))
+	if cache.recent.Len() != maxEntries {
+		t.Fatalf("expected %d eviction-order entries, got %d", maxEntries, cache.recent.Len())
 	}
 }
 

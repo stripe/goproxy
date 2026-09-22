@@ -22,7 +22,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/patrickmn/go-cache"
 	"golang.org/x/net/http/httpproxy"
 )
 
@@ -553,9 +552,16 @@ func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy strin
 type mitmCertCache struct {
 	mu         sync.Mutex
 	maxEntries int
-	entries    *cache.Cache
+	ttl        time.Duration
+	now        func() time.Time
+	entries    map[string]*list.Element
 	recent     list.List
-	positions  map[string]*list.Element
+}
+
+type mitmCertCacheEntry struct {
+	host      string
+	cert      tls.Certificate
+	expiresAt time.Time
 }
 
 func newMITMCertCache(maxEntries int, ttl time.Duration) *mitmCertCache {
@@ -564,10 +570,9 @@ func newMITMCertCache(maxEntries int, ttl time.Duration) *mitmCertCache {
 	}
 	return &mitmCertCache{
 		maxEntries: maxEntries,
-		// Disable background cleanup so entries and eviction order are updated
-		// together under mu. Expired entries are removed on lookup or eviction.
-		entries:   cache.New(ttl, 0),
-		positions: make(map[string]*list.Element),
+		ttl:        ttl,
+		now:        time.Now,
+		entries:    make(map[string]*list.Element),
 	}
 }
 
@@ -575,13 +580,17 @@ func (c *mitmCertCache) get(host string) (tls.Certificate, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	value, ok := c.entries.Get(host)
+	position, ok := c.entries[host]
 	if !ok {
-		c.remove(host)
 		return tls.Certificate{}, false
 	}
-	c.recent.MoveToFront(c.positions[host])
-	return value.(tls.Certificate), true
+	entry := position.Value.(*mitmCertCacheEntry)
+	if !entry.expiresAt.After(c.now()) {
+		c.remove(position)
+		return tls.Certificate{}, false
+	}
+	c.recent.MoveToFront(position)
+	return entry.cert, true
 }
 
 func (c *mitmCertCache) store(host string, cert tls.Certificate) tls.Certificate {
@@ -590,28 +599,32 @@ func (c *mitmCertCache) store(host string, cert tls.Certificate) tls.Certificate
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if value, ok := c.entries.Get(host); ok {
-		cert = value.(tls.Certificate)
-	}
-	if position, ok := c.positions[host]; ok {
-		c.recent.MoveToFront(position)
-	} else {
-		if c.recent.Len() >= c.maxEntries {
-			c.remove(c.recent.Back().Value.(string))
+	now := c.now()
+	if position, ok := c.entries[host]; ok {
+		entry := position.Value.(*mitmCertCacheEntry)
+		if entry.expiresAt.After(now) {
+			cert = entry.cert
 		}
-		c.positions[host] = c.recent.PushFront(host)
+		entry.cert = cert
+		entry.expiresAt = now.Add(c.ttl)
+		c.recent.MoveToFront(position)
+		return cert
 	}
-	c.entries.SetDefault(host, cert)
+	if len(c.entries) >= c.maxEntries {
+		c.remove(c.recent.Back())
+	}
+	c.entries[host] = c.recent.PushFront(&mitmCertCacheEntry{
+		host:      host,
+		cert:      cert,
+		expiresAt: now.Add(c.ttl),
+	})
 	return cert
 }
 
-// remove deletes a host from the cache and eviction order. Caller holds mu.
-func (c *mitmCertCache) remove(host string) {
-	c.entries.Delete(host)
-	if position, ok := c.positions[host]; ok {
-		c.recent.Remove(position)
-		delete(c.positions, host)
-	}
+// remove deletes an entry from the cache and eviction order. Caller holds mu.
+func (c *mitmCertCache) remove(position *list.Element) {
+	c.recent.Remove(position)
+	delete(c.entries, position.Value.(*mitmCertCacheEntry).host)
 }
 
 func TLSConfigFromCA(ca *tls.Certificate) func(host string, ctx *ProxyCtx) (*tls.Config, error) {
